@@ -27,16 +27,48 @@ export class OllamaHandler extends BaseProvider implements SingleCompletionHandl
 	override async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): ApiStream {
 		const modelId = this.getModel().id
 		const useR1Format = modelId.toLowerCase().includes("deepseek-r1")
+
+		// I've seen better results when user request comes at the end of user content
+		// User messages here seem to have the user's request/task first, then context data
+		// I was seeing several local models reply like there was nothing to do, but
+		// flipping content seems to focus on the <task>...</task> part at the end of user message
+		const flippedMessages = messages.map((m) => {
+			if (m.role === "user" && Array.isArray(m.content)) {
+				m.content = m.content.reverse()
+			}
+			return m
+		})
+
 		const openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
 			{ role: "system", content: systemPrompt },
-			...(useR1Format ? convertToR1Format(messages) : convertToOpenAiMessages(messages)),
+			...(useR1Format ? convertToR1Format(flippedMessages) : convertToOpenAiMessages(flippedMessages)),
 		]
 
 		const stream = await this.client.chat.completions.create({
 			model: this.getModel().id,
 			messages: openAiMessages,
 			temperature: this.options.modelTemperature ?? 0,
-			stream: true,
+			tools: [
+				{
+					type: "function",
+					function: {
+						name: "write_to_file",
+						description: "Create a file",
+						parameters: {
+							type: "object",
+							properties: {
+								path: { type: "string" },
+								content: { type: "string" },
+								line_count: { type: "number" },
+							},
+							required: ["path", "content", "line_count"],
+							additionalProperties: false,
+							$schema: "http://json-schema.org/draft-07/schema#",
+						},
+					},
+				},
+			],
+			stream: false,
 		})
 		const matcher = new XmlMatcher(
 			"think",
@@ -46,17 +78,49 @@ export class OllamaHandler extends BaseProvider implements SingleCompletionHandl
 					text: chunk.data,
 				}) as const,
 		)
-		for await (const chunk of stream) {
-			const delta = chunk.choices[0]?.delta
-
-			if (delta?.content) {
-				for (const chunk of matcher.update(delta.content)) {
+		for (const choice of stream.choices) {
+			if (choice.message.content) {
+				for (const chunk of matcher.update(choice.message.content)) {
 					yield chunk
 				}
+			} else if (choice.message.tool_calls) {
+				function convertToXML(obj: any): string {
+					let xml = ""
+
+					for (const key in obj) {
+						if (obj.hasOwnProperty(key)) {
+							const value = obj[key]
+							// If the value is an object, recursively call the function
+							if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+								xml += `<${key}>${convertToXML(value)}</${key}>`
+							} else if (Array.isArray(value)) {
+								// If the value is an array, iterate over each element
+								value.forEach((item: any) => {
+									xml += `<${key}>${convertToXML(item)}</${key}>`
+								})
+							} else {
+								// For primitive values, just add them to the XML string
+								xml += `<${key}>${value}</${key}>`
+							}
+						}
+					}
+
+					return xml
+				}
+				for (const tool of choice.message.tool_calls) {
+					const args = JSON.parse(tool.function.arguments) as Record<string, unknown>
+					const xml = `<${tool.function.name}>
+						${convertToXML(args)}
+					</${tool.function.name}>`
+					console.info("TOOL CALL", xml)
+					for (const chunk of matcher.update(xml)) {
+						yield chunk
+					}
+				}
 			}
-		}
-		for (const chunk of matcher.final()) {
-			yield chunk
+			for (const chunk of matcher.final()) {
+				yield chunk
+			}
 		}
 	}
 

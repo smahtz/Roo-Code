@@ -495,7 +495,7 @@ export class Cline {
 
 		await pWaitFor(() => this.askResponse !== undefined || this.lastMessageTs !== askTs, { interval: 100 })
 		if (this.lastMessageTs !== askTs) {
-			throw new Error("Current ask promise was ignored") // could happen if we send multiple asks in a row i.e. with command_output. It's important that when we know an ask could fail, it is handled gracefully
+			throw new Error("Current ask promise was ignored #3") // could happen if we send multiple asks in a row i.e. with command_output. It's important that when we know an ask could fail, it is handled gracefully
 		}
 		const result = { response: this.askResponse!, text: this.askResponseText, images: this.askResponseImages }
 		this.askResponse = undefined
